@@ -33,33 +33,43 @@ func ShipMatcher(keywords []string) *regexp.Regexp {
 	return regexp.MustCompile(`(?i)\b(` + strings.Join(parts, "|") + `)\b`)
 }
 
+// isSystemReminder reports whether a text block is one Claude Code injected rather than
+// something the user or a tool result wrote.
+func isSystemReminder(t string) bool {
+	return strings.HasPrefix(strings.TrimSpace(t), "<system-reminder>")
+}
+
 // DetectAnthropic classifies a Messages API request body.
+//
+// Plan mode is read from the newest user message only, and only from a system-reminder block
+// inside it. Claude Code rebuilds that reminder from the live permission mode on every request,
+// so its presence means plan mode is on *now* -- which makes this self-clearing. Scanning the
+// whole history instead made the phase sticky: an ExitPlanMode call ages out of the context on
+// compaction while the marker survives in the summary, and the session never leaves plan again.
+// Requiring the system-reminder wrapper is what keeps a user who merely typed, quoted or read
+// the words "Plan mode is active" from being routed as planning for the rest of the session.
 func DetectAnthropic(body map[string]any, ship *regexp.Regexp) string {
 	msgs, _ := body["messages"].([]any)
-	planIdx, exitIdx := -1, -1
-	lastUser := ""
+	lastUser, newest := "", -1
 	for i, m := range msgs {
 		mm, _ := m.(map[string]any)
-		switch mm["role"] {
-		case "user":
-			for _, t := range textBlocks(mm["content"]) {
-				if strings.Contains(t, anthropicPlanMarker) {
-					planIdx = i
-				}
-				if !strings.HasPrefix(strings.TrimSpace(t), "<system-reminder>") {
-					lastUser = t
-				}
-			}
-		case "assistant":
-			for _, n := range toolUseNames(mm["content"]) {
-				if n == "ExitPlanMode" {
-					exitIdx = i
-				}
+		if mm["role"] != "user" {
+			continue
+		}
+		newest = i
+		for _, t := range textBlocks(mm["content"]) {
+			if !isSystemReminder(t) {
+				lastUser = t
 			}
 		}
 	}
-	if planIdx > exitIdx {
-		return Plan
+	if newest >= 0 {
+		mm, _ := msgs[newest].(map[string]any)
+		for _, t := range textBlocks(mm["content"]) {
+			if isSystemReminder(t) && strings.Contains(t, anthropicPlanMarker) {
+				return Plan
+			}
+		}
 	}
 	if ship != nil && ship.MatchString(lastUser) {
 		return Ship
