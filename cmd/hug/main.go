@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"time"
@@ -24,6 +25,17 @@ import (
 )
 
 var version = "dev"
+
+// init fills in the version from the module build info, so `go install ...@v0.1.0`
+// reports v0.1.0 without needing ldflags.
+func init() {
+	if version != "dev" {
+		return
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+		version = bi.Main.Version
+	}
+}
 
 const usageText = `hug — per-phase model routing for coding agents
 

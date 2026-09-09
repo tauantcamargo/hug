@@ -24,6 +24,13 @@ hug init        # writes ~/.hug/hug.toml, wires the apps above, starts the daemo
 hug status
 ```
 
+`go install` puts the binary in `$(go env GOPATH)/bin`. If `hug` is not found afterwards, add that
+directory to your `PATH`, or symlink it somewhere already on it:
+
+```sh
+ln -sf "$(go env GOPATH)/bin/hug" ~/.local/bin/hug
+```
+
 Restart open agent sessions once; from then on every request flows through `127.0.0.1:4711`.
 
 ## Toggle
