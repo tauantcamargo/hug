@@ -156,7 +156,7 @@ func (s *Server) decide(vendor string, payload map[string]any, session string) p
 	if auxiliary(payload) {
 		d := policy.Decision{Time: time.Now(), Vendor: vendor, App: policy.AppFor(vendor), Session: session,
 			Phase: "aux", Requested: requested, Model: requested, Tier: policy.TierNormal,
-			Reason: "auxiliary call (no tools, small output budget) — left on the model the app chose"}
+			Reason: "auxiliary call (no tool schema) — left on the model the app chose"}
 		s.log.Add(d)
 		return d
 	}
