@@ -65,6 +65,12 @@ func (l *DecisionLog) Recent(n int) []policy.Decision {
 func (l *DecisionLog) Since(seq uint64) []policy.Decision {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	// A watcher asking for a Seq we never issued has outlived a daemon restart: our counter
+	// went back to zero while it kept its high-water mark. Without this it would match
+	// nothing for the rest of its life, and silently, since the request still succeeds.
+	if seq > l.seq {
+		seq = 0
+	}
 	var out []policy.Decision
 	for _, d := range l.ring {
 		if d.Seq > seq {

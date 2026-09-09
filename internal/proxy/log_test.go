@@ -40,3 +40,26 @@ func TestDecisionLogRingCapPreservesSeq(t *testing.T) {
 		t.Fatalf("Since across an evicted entry: %+v", since)
 	}
 }
+
+// A watcher outlives a daemon restart: it holds a Seq from the previous process while the
+// new log counts from zero again. It must resync instead of matching nothing forever.
+func TestDecisionLogSinceAfterDaemonRestart(t *testing.T) {
+	restarted := NewDecisionLog("", 10)
+
+	// Nothing recorded yet by the new process; a stale watcher must not error or block.
+	if got := restarted.Since(47); len(got) != 0 {
+		t.Fatalf("stale Since on an empty log: %+v", got)
+	}
+
+	restarted.Add(policy.Decision{Phase: "plan"})
+	restarted.Add(policy.Decision{Phase: "implement"})
+
+	got := restarted.Since(47)
+	if len(got) != 2 || got[0].Phase != "plan" || got[1].Phase != "implement" {
+		t.Fatalf("stale watcher did not resync after restart: %+v", got)
+	}
+	// Having resynced, it tracks the new counter normally.
+	if after := restarted.Since(got[len(got)-1].Seq); len(after) != 0 {
+		t.Fatalf("Since(latest) after resync must be empty, got %+v", after)
+	}
+}
