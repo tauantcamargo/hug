@@ -4,7 +4,9 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -150,6 +152,13 @@ func (s *Server) recordUsage(sn usage.Snapshot) {
 	}
 }
 
+// clientGone reports whether a proxy error is just the caller hanging up mid-flight — an
+// app closing a poll, a superseded request, a cancelled turn — rather than a real upstream
+// failure. Nothing failed, and nobody is left to read a 502, so these are not worth logging.
+func clientGone(err error, r *http.Request) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(r.Context().Err(), context.Canceled)
+}
+
 func newReverseProxy(upstream string) *httputil.ReverseProxy {
 	u, err := url.Parse(upstream)
 	if err != nil {
@@ -163,6 +172,9 @@ func newReverseProxy(upstream string) *httputil.ReverseProxy {
 		r.Host = u.Host
 	}
 	rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		if clientGone(err, r) {
+			return
+		}
 		log.Printf("upstream error %s %s: %v", r.Method, r.URL.Path, err)
 		http.Error(w, "hug: upstream error: "+err.Error(), http.StatusBadGateway)
 	}
