@@ -108,12 +108,18 @@ func has(args []string, flag string) bool {
 
 func cmdInit(args []string) error {
 	dry := has(args, "--dry-run")
-	created, err := config.EnsureDefault()
-	if err != nil {
-		return err
-	}
-	if created {
-		fmt.Println("wrote", config.Path())
+	if dry {
+		if _, err := os.Stat(config.Path()); os.IsNotExist(err) {
+			fmt.Println("  would write", config.Path())
+		}
+	} else {
+		created, err := config.EnsureDefault()
+		if err != nil {
+			return err
+		}
+		if created {
+			fmt.Println("wrote", config.Path())
+		}
 	}
 	if err := cmdWire(true, args); err != nil {
 		return err
