@@ -49,6 +49,43 @@ type Server struct {
 	lastTier     map[string]policy.Tier
 	lastNotifyAt map[string]time.Time
 	lastRoute    map[string]string
+	unusable     map[string]string
+}
+
+// markUnusable records that a vendor refused a model for reasons that will not change on a
+// retry -- the client is too old for it, the account cannot reach it. Without this, a chain
+// entry the client cannot use costs a failed round trip on every single request.
+func (s *Server) markUnusable(vendor, model, why string) {
+	key := vendor + "|" + model
+	s.tierMu.Lock()
+	_, known := s.unusable[key]
+	s.unusable[key] = why
+	s.tierMu.Unlock()
+	if !known {
+		log.Printf("model %s is unusable here, skipping it from now on: %s", model, why)
+	}
+}
+
+func (s *Server) isUnusable(vendor, model string) bool {
+	s.tierMu.Lock()
+	defer s.tierMu.Unlock()
+	_, bad := s.unusable[model]
+	if bad {
+		return true
+	}
+	_, bad = s.unusable[vendor+"|"+model]
+	return bad
+}
+
+// compatFor builds the routing constraint for a vendor: never pick a model this daemon has
+// already watched the vendor reject, and for Codex never cross the wire-protocol split.
+func (s *Server) compatFor(vendor string, wire policy.Compat) policy.Compat {
+	return func(requested, candidate string) bool {
+		if candidate != requested && s.isUnusable(vendor, candidate) {
+			return false
+		}
+		return wire == nil || wire(requested, candidate)
+	}
 }
 
 // New builds a server from config. notifier may be nil to disable desktop notifications
@@ -62,7 +99,8 @@ func New(cfg config.Config, store *usage.Store, dlog *DecisionLog, models *catal
 		models = catalog.Load("")
 	}
 	s := &Server{cfg: cfg, usage: store, catalog: models, log: dlog, ship: phase.ShipMatcher(cfg.Detect.ShipKeywords), notifier: notifier, started: time.Now(),
-		lastTier: map[string]policy.Tier{}, lastNotifyAt: map[string]time.Time{}, lastRoute: map[string]string{}}
+		lastTier: map[string]policy.Tier{}, lastNotifyAt: map[string]time.Time{}, lastRoute: map[string]string{},
+		unusable: map[string]string{}}
 	s.anth = newReverseProxy(cfg.Upstreams.Anthropic)
 	s.anth.ModifyResponse = func(res *http.Response) error {
 		if sn, ok := usage.ParseAnthropicHeaders(res.Header, time.Now()); ok {

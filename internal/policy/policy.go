@@ -38,6 +38,10 @@ type Decision struct {
 	Tier      Tier      `json:"tier"`
 	Reason    string    `json:"reason"`
 	Rewritten bool      `json:"rewritten"`
+	// Alternatives are the rest of the chain below Model, best first. The proxy walks these
+	// when the vendor rejects Model itself, so a chain entry the client cannot actually use
+	// costs one retry rather than a failed turn.
+	Alternatives []string `json:"alternatives,omitempty"`
 }
 
 var effortLadder = []string{"low", "medium", "high", "xhigh"}
@@ -152,12 +156,21 @@ func Decide(cfg config.Config, st state.State, snap *usage.Snapshot, vendor, pha
 	if idx > len(chain)-1 {
 		idx = len(chain) - 1
 	}
-	chosen := chain[len(chain)-1]
+	chosen, at := chain[len(chain)-1], len(chain)-1
 	for i := idx; i < len(chain); i++ {
 		if !modelExhausted(snap, chain[i]) {
-			chosen = chain[i]
+			chosen, at = chain[i], i
 			break
 		}
+	}
+	for _, m := range chain[at+1:] {
+		if !modelExhausted(snap, m) {
+			d.Alternatives = append(d.Alternatives, m)
+		}
+	}
+	// The model the app asked for is the last resort: it is the one thing we know it supports.
+	if requested != "" && chosen != requested {
+		d.Alternatives = append(d.Alternatives, requested)
 	}
 	d.Model = chosen
 	d.Rewritten = chosen != requested

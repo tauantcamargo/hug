@@ -25,9 +25,9 @@ func chatGPTAuth(r *http.Request) bool {
 // Only the ChatGPT-subscription backend has that split; the plain API does not.
 func (s *Server) codexCompat(r *http.Request) policy.Compat {
 	if !chatGPTAuth(r) {
-		return nil
+		return s.compatFor("openai", nil)
 	}
-	return s.catalog.Compatible
+	return s.compatFor("openai", s.catalog.Compatible)
 }
 
 func (s *Server) openai(w http.ResponseWriter, r *http.Request) {

@@ -137,9 +137,14 @@ Each phase is a fallback chain, best model first. The `[budget]` tier picks the 
 
 Phase detection uses markers the agents inject themselves, so it is deterministic:
 
-- Claude Code: `Plan mode is active` system-reminder in the user turn, cleared by an `ExitPlanMode` tool call
+- Claude Code: a `Plan mode is active` system-reminder in the **newest** user message. Claude Code rebuilds that reminder from the live permission mode on every request, so reading the newest turn is both sufficient and self-clearing — nothing has to detect leaving plan mode. The `<system-reminder>` wrapper is required, so typing, quoting or reading the words does not route you as planning
 - Codex: `<collaboration_mode>Plan</collaboration_mode>` in developer instructions
-- ship: keyword heuristic on the last user message (`[detect] ship_keywords`), off when the list is empty
+- ship: keyword heuristic on the last user message (`[detect] ship_keywords`), off when the list is empty. This one is a guess and can misfire when you are *talking about* shipping rather than shipping — empty the list to turn it off
+
+If the vendor rejects the model hug picked — a chain entry your CLI is too old for, a model your
+account cannot reach — hug retries the turn down the rest of the chain, ending at the model the app
+originally asked for, and remembers the dud so later requests skip it. Errors any model would hit
+(auth, rate limits, oversized context) are passed straight back untouched.
 
 Agents also fire side calls around each turn: conversation titles, classifiers, cache warmups. They
 arrive with no tool schema, so hug leaves them on whatever cheap model the app already picked
