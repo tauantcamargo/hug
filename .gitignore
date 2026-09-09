@@ -1,0 +1,4 @@
+/hug
+/dist/
+*.log
+.DS_Store
