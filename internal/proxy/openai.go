@@ -12,12 +12,22 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/tauantcamargo/hug/internal/policy"
 	"github.com/tauantcamargo/hug/internal/usage"
 )
 
 // chatGPTAuth reports whether the request carries a ChatGPT subscription token rather than an API key.
 func chatGPTAuth(r *http.Request) bool {
 	return r.Header.Get("Chatgpt-Account-Id") != "" || strings.HasPrefix(r.Header.Get("Authorization"), "Bearer eyJ")
+}
+
+// codexCompat confines swaps to models that speak the wire protocol of the one the app picked.
+// Only the ChatGPT-subscription backend has that split; the plain API does not.
+func (s *Server) codexCompat(r *http.Request) policy.Compat {
+	if !chatGPTAuth(r) {
+		return nil
+	}
+	return s.catalog.Compatible
 }
 
 func (s *Server) openai(w http.ResponseWriter, r *http.Request) {
@@ -42,7 +52,7 @@ func (s *Server) rewriteOpenAIHTTP(r *http.Request) {
 	}
 	var payload map[string]any
 	if json.Unmarshal(body, &payload) == nil {
-		if d := s.decide("openai", payload, r.Header.Get("Session-Id")); d.Rewritten || d.Effort != "" {
+		if d := s.decide("openai", payload, r.Header.Get("Session-Id"), s.codexCompat(r)); d.Rewritten || d.Effort != "" {
 			applyOpenAI(payload, d.Model, d.Effort, d.Rewritten)
 			body = marshal(payload)
 			if d.Rewritten {
@@ -108,6 +118,7 @@ func (s *Server) openaiWebsocket(w http.ResponseWriter, r *http.Request, upstrea
 		}
 	}()
 	session := r.Header.Get("Session-Id")
+	compat := s.codexCompat(r)
 
 	// client -> upstream
 	errc := make(chan error, 2)
@@ -119,7 +130,7 @@ func (s *Server) openaiWebsocket(w http.ResponseWriter, r *http.Request, upstrea
 				return
 			}
 			if mt == websocket.TextMessage {
-				msg = s.rewriteOpenAIFrame(msg, session, hdr)
+				msg = s.rewriteOpenAIFrame(msg, session, hdr, compat)
 			}
 			if up == nil {
 				conn, resp, err := websocket.DefaultDialer.Dial(target.String(), hdr)
@@ -165,12 +176,12 @@ func (s *Server) pumpUpstream(up, client *websocket.Conn, errc chan<- error) {
 }
 
 // rewriteOpenAIFrame applies policy to a `response.create` frame and keeps the routing hint header consistent.
-func (s *Server) rewriteOpenAIFrame(msg []byte, session string, hdr http.Header) []byte {
+func (s *Server) rewriteOpenAIFrame(msg []byte, session string, hdr http.Header, compat policy.Compat) []byte {
 	var payload map[string]any
 	if json.Unmarshal(msg, &payload) != nil || payload["type"] != "response.create" {
 		return msg
 	}
-	d := s.decide("openai", payload, session)
+	d := s.decide("openai", payload, session, compat)
 	if !d.Rewritten && d.Effort == "" {
 		return msg
 	}

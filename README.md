@@ -53,17 +53,17 @@ Toggling only writes `~/.hug/state.json`; the daemon reads it on every request. 
 ```toml
 [phases.plan]
 anthropic = ["claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"]
-openai    = ["gpt-6-astra", "gpt-5.5"]
+openai    = ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-luna"]
 effort    = "xhigh"
 
 [phases.implement]
 anthropic = ["claude-opus-5", "claude-sonnet-5"]
-openai    = ["gpt-6-astra", "gpt-5.5"]
+openai    = ["gpt-6-astra", "gpt-5.6-terra", "gpt-5.6-luna"]
 effort    = "medium"
 
 [phases.ship]
 anthropic = ["claude-sonnet-5", "claude-haiku-4-5-20251001"]
-openai    = ["gpt-5.6-luna", "gpt-5.5"]
+openai    = ["gpt-5.6-luna"]
 effort    = "low"
 
 [budget]
@@ -86,9 +86,40 @@ Phase detection uses markers the agents inject themselves, so it is deterministi
 - ship: keyword heuristic on the last user message (`[detect] ship_keywords`), off when the list is empty
 
 Agents also fire side calls around each turn: conversation titles, classifiers, cache warmups. They
-arrive with an empty tool schema, so hug leaves them on whatever cheap model the app already picked
+arrive with no tool schema, so hug leaves them on whatever cheap model the app already picked
 instead of promoting them to the phase's top model. They show up as the `aux` phase in `hug status`.
 Measured on Claude Code 2.1.266, that is one extra premium call per turn avoided.
+
+"No tool schema" is not the same as "no `tools` array". Codex over websocket sends its schema
+exactly once, as an `additional_tools` item in the thread's opening frame; every turn after that is
+an incremental frame chained by `previous_response_id` that inherits it server-side. Reading those
+as toolless files every real Codex turn as `aux` and routes nothing at all, so hug counts either
+signal as a schema being in play.
+
+### Codex models come in two wire protocols
+
+OpenAI splits its Codex models across two incompatible wire protocols. `gpt-6-astra` and the
+`gpt-5.6-*` family speak "responses lite"; `gpt-5.5` and `gpt-5.3-codex-spark` do not. Codex picks
+the protocol from the model **you** selected and sends the matching handshake, so a request built
+for a lite model that names a non-lite one is rejected outright:
+
+```
+{"type":"error","error":{"code":"unsupported_value",
+ "message":"This model is not supported when using X-OpenAI-Internal-Codex-Responses-Lite."}}
+```
+
+hug learns which side each model is on from the model list Codex already fetches through it
+(cached in `~/.hug/models.json`) and never swaps across that line. A model it has never seen in a
+list is never swapped, since guessing wrong costs you a failed turn while not swapping costs
+nothing. A chain that mixes both sides is not an error — it just has fewer rungs to step down to,
+and `hug watch` says so:
+
+```
+implement phase, critical tier: primary window at 53% (2 chain model(s) skipped: not known to
+share the wire protocol of gpt-6-astra)
+```
+
+Keep each `openai` chain on one side of the split. The defaults above already do.
 
 ## Usage awareness
 
@@ -119,22 +150,37 @@ app made the request:
 15:41:02          ── anthropic now conserve — 5h window at 71% ──
 ```
 
-Desktop notifications fire on the same tier changes (macOS only today; a no-op elsewhere, hug still
+Desktop notifications fire on the same events (macOS only today; a no-op elsewhere, hug still
 works):
 
 ```toml
 [notify]
-tier_changes = true
-cooldown     = "5m"   # minimum gap between notifications for the same vendor
+tier_changes    = true   # a vendor entered or left a budget tier
+routing_changes = true   # a phase started being served by a different model than you picked
+cooldown        = "5m"   # minimum gap between tier notifications for the same vendor
 ```
 
-The very first observation of a vendor's tier is never a "change" — it just seeds the baseline, so
-the daemon doesn't fire a notification for every vendor the moment it starts.
+Since no app UI can show the served model, `routing_changes` is the only in-your-face signal that a
+rewrite happened. It is keyed by app and phase, not by session, so opening a new chat does not
+re-announce a routing you already know about.
+
+A first observation at `normal` just seeds the baseline and stays quiet. A first observation
+*already* in a degraded tier does notify ("already conserve"): that means the daemon came up mid-
+window and the crossing happened while it was down, so staying silent would leave you downgraded
+with no signal at all.
+
+To check that notifications actually reach your screen, ask the daemon to send one — it runs under
+launchd, and that is the process whose delivery path matters:
+
+```sh
+hug notify --test
+```
 
 ## How it works
 
 - `/anthropic/*` is a reverse proxy to `api.anthropic.com`. `POST /v1/messages` bodies get their `model` rewritten. OAuth headers pass through untouched.
 - `/openai/*` is a reverse proxy to `chatgpt.com/backend-api/codex` (subscription tokens) or `api.openai.com/v1` (API keys). Codex talks websocket; hug terminates it, rewrites `model` and `reasoning.effort` inside `response.create` frames, and keeps the `X-Codex-Routing-Hint` header consistent.
+- The Codex model list flowing back through `/openai/models` is copied into `~/.hug/models.json` on its way to the app, which is how hug knows each model's wire protocol. The response itself is passed through untouched.
 - Cross-vendor routing inside one session is not attempted; each vendor's chain only contains that vendor's models.
 
 ## Gotchas learned the hard way
@@ -142,6 +188,8 @@ the daemon doesn't fire a notification for every vendor the moment it starts.
 - `openai_base_url` must be a top-level key in `config.toml`. After any `[table]` it silently belongs to that table. hug writes it at the top.
 - GUI apps do not inherit your shell `PATH`, so hug never relies on shims; it edits the config files the apps already read.
 - Claude Code reports usage under the *requested* model name, not the served one. `hug status` and `hug watch` show the truth.
+- Codex sends its tool schema once per thread, not once per turn. Anything that keys off "this request has no tools" has to account for that or it silently skips every Codex turn.
+- Swapping a Codex model is not free-form: the request's wire protocol was already chosen from the model the app picked. See the split above.
 
 ## Development
 

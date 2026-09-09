@@ -31,7 +31,7 @@ func (s *Server) rewriteAnthropic(r *http.Request) {
 		reset(body)
 		return
 	}
-	d := s.decide("anthropic", payload, anthropicSession(payload))
+	d := s.decide("anthropic", payload, anthropicSession(payload), nil)
 	if d.Rewritten {
 		payload["model"] = d.Model
 		body = marshal(payload)

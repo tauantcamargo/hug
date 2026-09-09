@@ -15,7 +15,7 @@ func newTestServer(notifyEnabled bool, cooldown string) (*Server, *notify.Record
 	cfg.Notify.TierChanges = notifyEnabled
 	cfg.Notify.Cooldown = cooldown
 	rec := &notify.Recording{}
-	return New(cfg, usage.NewStore(""), NewDecisionLog("", 50), rec), rec
+	return New(cfg, usage.NewStore(""), NewDecisionLog("", 50), nil, rec), rec
 }
 
 func snap(vendor string, util float64) usage.Snapshot {

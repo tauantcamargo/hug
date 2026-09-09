@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tauantcamargo/hug/internal/catalog"
 	"github.com/tauantcamargo/hug/internal/config"
 	"github.com/tauantcamargo/hug/internal/daemon"
 	"github.com/tauantcamargo/hug/internal/notify"
@@ -273,7 +274,8 @@ func cmdDaemon(args []string) error {
 	case "run":
 		store := usage.NewStore(filepath.Join(config.Dir(), "usage.json"))
 		dlog := proxy.NewDecisionLog(filepath.Join(config.Dir(), "decisions.jsonl"), 200)
-		srv := proxy.New(cfg, store, dlog, notify.New())
+		models := catalog.Load(filepath.Join(config.Dir(), "models.json"))
+		srv := proxy.New(cfg, store, dlog, models, notify.New())
 		log.Printf("hug %s listening on %s (anthropic -> %s, openai -> %s | %s)", version, cfg.Listen, cfg.Upstreams.Anthropic, cfg.Upstreams.OpenAIChatGPT, cfg.Upstreams.OpenAIAPI)
 		return http.ListenAndServe(cfg.Listen, srv.Handler())
 	case "install":

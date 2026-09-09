@@ -4,10 +4,12 @@ package proxy
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httputil"
@@ -18,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tauantcamargo/hug/internal/catalog"
 	"github.com/tauantcamargo/hug/internal/config"
 	"github.com/tauantcamargo/hug/internal/notify"
 	"github.com/tauantcamargo/hug/internal/phase"
@@ -33,6 +36,7 @@ var Version = "dev"
 type Server struct {
 	cfg      config.Config
 	usage    *usage.Store
+	catalog  *catalog.Catalog
 	log      *DecisionLog
 	ship     *regexp.Regexp
 	notifier notify.Notifier
@@ -48,12 +52,16 @@ type Server struct {
 }
 
 // New builds a server from config. notifier may be nil to disable desktop notifications
-// entirely (tier-change events still show up in `hug watch` and the daemon log).
-func New(cfg config.Config, store *usage.Store, dlog *DecisionLog, notifier notify.Notifier) *Server {
+// entirely (tier-change events still show up in `hug watch` and the daemon log). models may
+// be nil for an in-memory catalog.
+func New(cfg config.Config, store *usage.Store, dlog *DecisionLog, models *catalog.Catalog, notifier notify.Notifier) *Server {
 	if notifier == nil {
 		notifier = notify.NoopNotifier{}
 	}
-	s := &Server{cfg: cfg, usage: store, log: dlog, ship: phase.ShipMatcher(cfg.Detect.ShipKeywords), notifier: notifier, started: time.Now(),
+	if models == nil {
+		models = catalog.Load("")
+	}
+	s := &Server{cfg: cfg, usage: store, catalog: models, log: dlog, ship: phase.ShipMatcher(cfg.Detect.ShipKeywords), notifier: notifier, started: time.Now(),
 		lastTier: map[string]policy.Tier{}, lastNotifyAt: map[string]time.Time{}, lastRoute: map[string]string{}}
 	s.anth = newReverseProxy(cfg.Upstreams.Anthropic)
 	s.anth.ModifyResponse = func(res *http.Response) error {
@@ -63,6 +71,7 @@ func New(cfg config.Config, store *usage.Store, dlog *DecisionLog, notifier noti
 		return nil
 	}
 	s.oaiChat = newReverseProxy(cfg.Upstreams.OpenAIChatGPT)
+	s.oaiChat.ModifyResponse = s.captureCodexModels
 	s.oaiAPI = newReverseProxy(cfg.Upstreams.OpenAIAPI)
 	return s
 }
@@ -211,16 +220,55 @@ func (s *Server) snapshot(vendor string) *usage.Snapshot {
 	return nil
 }
 
+// captureCodexModels learns each model's wire protocol from the list Codex fetches on start-up,
+// which already flows through here. The body is handed on untouched; only a copy is parsed.
+func (s *Server) captureCodexModels(res *http.Response) error {
+	if res.StatusCode != http.StatusOK || res.Request == nil || !strings.HasSuffix(res.Request.URL.Path, "/models") {
+		return nil
+	}
+	body, err := io.ReadAll(res.Body)
+	res.Body.Close()
+	if err != nil {
+		return err
+	}
+	res.Body = io.NopCloser(bytes.NewReader(body))
+	res.ContentLength = int64(len(body))
+	res.Header.Set("Content-Length", strconv.Itoa(len(body)))
+
+	raw := body
+	if res.Header.Get("Content-Encoding") == "gzip" {
+		zr, err := gzip.NewReader(bytes.NewReader(body))
+		if err != nil {
+			return nil
+		}
+		if raw, err = io.ReadAll(zr); err != nil {
+			return nil
+		}
+	}
+	models, ok := catalog.ParseCodexModels(raw)
+	if !ok {
+		return nil
+	}
+	s.catalog.Update(models)
+	lite := 0
+	for _, m := range models {
+		if m.ResponsesLite {
+			lite++
+		}
+	}
+	log.Printf("codex model list: %d models, %d responses-lite", len(models), lite)
+	return nil
+}
+
 // auxiliary reports whether a request is one of the side calls agents make around a turn
 // rather than the turn itself: conversation titles, classifiers, cache warmups.
 //
-// The decisive signal is an empty tool schema. An agentic turn always ships its tools; Claude
-// Code's title request, for example, arrives with zero tools and a 3 KB system prompt next to
-// the real turn's 30 tools and 27 KB. Routing those to the phase's top model spends premium
-// budget on work the app already assigned to a cheap model.
+// The decisive signal is the absence of a tool schema. An agentic turn always has tools in
+// play; Claude Code's title request, for example, arrives with zero tools and a 3 KB system
+// prompt next to the real turn's 30 tools and 27 KB. Routing those to the phase's top model
+// spends premium budget on work the app already assigned to a cheap model.
 func auxiliary(payload map[string]any) bool {
-	tools, _ := payload["tools"].([]any)
-	if len(tools) == 0 {
+	if !hasToolSchema(payload) {
 		return true
 	}
 	// Tools present but almost no output budget: a warmup or probe, not a turn.
@@ -236,8 +284,29 @@ func auxiliary(payload map[string]any) bool {
 // auxMaxTokens is the output budget at or below which a request counts as a probe.
 const auxMaxTokens = 64
 
+// hasToolSchema reports whether tools are in play for a request. Anthropic and the plain
+// Responses API list them top-level. Codex over websocket does not: the schema rides once as
+// an `additional_tools` input item in the thread's opening frame, and every turn after that is
+// an incremental frame chained by previous_response_id that inherits it server-side. Seen live
+// from codex-cli 0.153.4 — reading those as toolless swallowed every Codex turn as auxiliary.
+func hasToolSchema(payload map[string]any) bool {
+	if tools, _ := payload["tools"].([]any); len(tools) > 0 {
+		return true
+	}
+	if prev, _ := payload["previous_response_id"].(string); prev != "" {
+		return true
+	}
+	items, _ := payload["input"].([]any)
+	for _, it := range items {
+		if m, _ := it.(map[string]any); m["type"] == "additional_tools" {
+			return true
+		}
+	}
+	return false
+}
+
 // decide runs detection and policy for one parsed request payload.
-func (s *Server) decide(vendor string, payload map[string]any, session string) policy.Decision {
+func (s *Server) decide(vendor string, payload map[string]any, session string, compat policy.Compat) policy.Decision {
 	requested, _ := payload["model"].(string)
 	if auxiliary(payload) {
 		d := policy.Decision{Time: time.Now(), Vendor: vendor, App: policy.AppFor(vendor), Session: session,
@@ -252,7 +321,7 @@ func (s *Server) decide(vendor string, payload map[string]any, session string) p
 	} else {
 		ph = phase.DetectOpenAI(payload, s.ship)
 	}
-	d := policy.Decide(s.cfg, state.Load(), s.snapshot(vendor), vendor, ph, requested, time.Now())
+	d := policy.Decide(s.cfg, state.Load(), s.snapshot(vendor), vendor, ph, requested, time.Now(), compat)
 	d.Session = session
 	s.log.Add(d)
 	log.Printf("%-9s %-9s %-24s -> %-24s %-9s %s", d.App, d.Phase, d.Requested, d.Model, d.Tier, d.Reason)

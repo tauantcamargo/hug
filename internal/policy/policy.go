@@ -70,8 +70,32 @@ func TierFor(b config.Budget, snap *usage.Snapshot, now time.Time) (Tier, string
 	return TierNormal, pct
 }
 
+// Compat reports whether candidate can answer a request the app built for requested. nil means
+// no constraint. The proxy supplies one for Codex, where the wire protocol follows the model
+// the app believes it is talking to (see catalog.Compatible).
+type Compat func(requested, candidate string) bool
+
+func compatible(c Compat, requested, candidate string) bool {
+	return c == nil || c(requested, candidate)
+}
+
+// usable keeps the chain entries that can stand in for requested, in order, so the tier still
+// indexes a best-first ladder even when the configured chain mixes protocols.
+func usable(chain []string, requested string, c Compat) []string {
+	if c == nil {
+		return chain
+	}
+	var out []string
+	for _, m := range chain {
+		if c(requested, m) {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 // Decide picks the model for one request.
-func Decide(cfg config.Config, st state.State, snap *usage.Snapshot, vendor, phase, requested string, now time.Time) Decision {
+func Decide(cfg config.Config, st state.State, snap *usage.Snapshot, vendor, phase, requested string, now time.Time, compat Compat) Decision {
 	d := Decision{Time: now, Vendor: vendor, App: AppFor(vendor), Phase: phase, Requested: requested, Model: requested, Tier: TierNormal}
 	if !st.Active(now) {
 		d.Reason = "hug is off"
@@ -82,6 +106,10 @@ func Decide(cfg config.Config, st state.State, snap *usage.Snapshot, vendor, pha
 		return d
 	}
 	if st.Pin != "" {
+		if !compatible(compat, requested, st.Pin) {
+			d.Reason = fmt.Sprintf("pinned %s is not known to share the wire protocol of %s — kept the app's model", st.Pin, requested)
+			return d
+		}
 		d.Model = st.Pin
 		d.Rewritten = d.Model != requested
 		d.Reason = "pinned"
@@ -106,6 +134,14 @@ func Decide(cfg config.Config, st state.State, snap *usage.Snapshot, vendor, pha
 	}
 	tier, why := TierFor(cfg.Budget, snap, now)
 	d.Tier = tier
+	d.Effort = effortFor(ph.Effort, tier)
+	kept := usable(chain, requested, compat)
+	skipped := len(chain) - len(kept)
+	if len(kept) == 0 {
+		d.Reason = fmt.Sprintf("%s phase, %s tier: %s — nothing in the chain is known to share the wire protocol of %s, kept it", phase, tier, why, requested)
+		return d
+	}
+	chain = kept
 	idx := 0
 	switch tier {
 	case TierConserve:
@@ -124,9 +160,11 @@ func Decide(cfg config.Config, st state.State, snap *usage.Snapshot, vendor, pha
 		}
 	}
 	d.Model = chosen
-	d.Effort = effortFor(ph.Effort, tier)
 	d.Rewritten = chosen != requested
 	d.Reason = fmt.Sprintf("%s phase, %s tier: %s", phase, tier, why)
+	if skipped > 0 {
+		d.Reason += fmt.Sprintf(" (%d chain model(s) skipped: not known to share the wire protocol of %s)", skipped, requested)
+	}
 	return d
 }
 

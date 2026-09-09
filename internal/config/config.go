@@ -75,19 +75,25 @@ openai_api     = "https://api.openai.com/v1"
 
 # Each phase lists a fallback chain, best model first. hug walks down the chain
 # as your subscription usage tightens (see [budget]).
+#
+# Codex chains must stay on one side of OpenAI's wire-protocol split: gpt-6-astra and the
+# gpt-5.6 family (sol, terra, luna) speak "responses lite"; gpt-5.5 and gpt-5.3-codex-spark
+# do not. Codex picks the protocol from the model you selected, so a swap across the split is
+# rejected upstream. hug learns the split from the model list Codex fetches and never crosses
+# it — a chain that mixes both sides simply has fewer places to step down to.
 [phases.plan]
 anthropic = ["claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"]
-openai    = ["gpt-6-astra", "gpt-5.5"]
+openai    = ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-luna"]
 effort    = "xhigh"
 
 [phases.implement]
 anthropic = ["claude-opus-5", "claude-sonnet-5"]
-openai    = ["gpt-6-astra", "gpt-5.5"]
+openai    = ["gpt-6-astra", "gpt-5.6-terra", "gpt-5.6-luna"]
 effort    = "medium"
 
 [phases.ship]
 anthropic = ["claude-sonnet-5", "claude-haiku-4-5-20251001"]
-openai    = ["gpt-5.6-luna", "gpt-5.5"]
+openai    = ["gpt-5.6-luna"]
 effort    = "low"
 
 [budget]
