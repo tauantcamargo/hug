@@ -84,6 +84,59 @@ func TestClaudeRoundTrip(t *testing.T) {
 	}
 }
 
+// Issue #2: settings.json is commonly committed to a dotfiles repo, so a 127.0.0.1 daemon URL
+// written there follows you to a machine with no daemon and breaks every request. hug writes the
+// per-machine settings.local.json instead, and cleans up the shared file if an older hug used it.
+func TestClaudeWritesLocalAndMigratesShared(t *testing.T) {
+	dir := t.TempDir()
+	shared := filepath.Join(dir, "settings.json")
+	local := claudeSettingsPath(dir)
+	const url = "http://127.0.0.1:4711/anthropic"
+
+	// An older hug put the URL in the shared file, next to the user's own settings.
+	_ = os.WriteFile(shared, []byte(`{"model":"opusplan","env":{"ANTHROPIC_BASE_URL":"`+url+`","FOO":"1"}}`), 0o644)
+	if !claudeWired(local) {
+		t.Fatal("a URL in the shared file must still read as wired, or status reports a false ✗")
+	}
+
+	if _, err := WireClaude(local, url); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(shared)
+	if strings.Contains(string(b), "ANTHROPIC_BASE_URL") {
+		t.Fatalf("wiring must move the URL out of the synced file:\n%s", b)
+	}
+	if !strings.Contains(string(b), `"FOO": "1"`) || !strings.Contains(string(b), "opusplan") {
+		t.Fatalf("migration must leave the user's own settings alone:\n%s", b)
+	}
+	if b, _ = os.ReadFile(local); !strings.Contains(string(b), url) {
+		t.Fatalf("the per-machine file should now carry the URL:\n%s", b)
+	}
+
+	if _, err := UnwireClaude(local); err != nil {
+		t.Fatal(err)
+	}
+	if claudeWired(local) {
+		t.Fatal("unwire must clear both files")
+	}
+}
+
+// hug off has to restore an install that predates the move, even though it never wrote that file.
+func TestClaudeUnwireCleansSharedFile(t *testing.T) {
+	dir := t.TempDir()
+	shared := filepath.Join(dir, "settings.json")
+	_ = os.WriteFile(shared, []byte(`{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:4711/anthropic"}}`), 0o644)
+
+	changed, err := UnwireClaude(claudeSettingsPath(dir))
+	if err != nil || !changed {
+		t.Fatalf("unwire: %v %v", changed, err)
+	}
+	b, _ := os.ReadFile(shared)
+	if strings.Contains(string(b), "ANTHROPIC_BASE_URL") {
+		t.Fatalf("stale URL left behind:\n%s", b)
+	}
+}
+
 func TestIsHugURL(t *testing.T) {
 	for _, ok := range []string{"http://127.0.0.1:4711/anthropic", "http://localhost:1/openai"} {
 		if !IsHugURL(ok) {

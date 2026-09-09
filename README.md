@@ -55,15 +55,52 @@ there is no need to re-run `hug wire`.
 ## Toggle
 
 ```sh
-hug off                 # pass-through, live sessions keep working
-hug off --for 2h        # re-enables itself
+hug off                 # restore the apps' own endpoints; hug is out of the way
+hug off --for 2h        # pause instead, re-enables itself
 hug off codex           # per app: claude | codex
 hug off ship            # per phase: plan | implement | ship
 hug pin claude-sonnet-5 # force one model for everything
 hug on
 ```
 
-Toggling only writes `~/.hug/state.json`; the daemon reads it on every request. App configs are only touched by `hug init`, `hug wire`, `hug unwire` and `hug uninstall`.
+`hug off` and `hug on` move the app config files, because "off" has to mean your agents keep
+working without hug — including after a reboot, or any time the daemon isn't running. `hug off`
+leaves the daemon up, so sessions you already have open still reach it and pass through untouched;
+only newly started ones read the restored config and go direct.
+
+Scoped and timed toggles (`hug off codex`, `hug off --for 2h`) are a pause, not a detach: they only
+write `~/.hug/state.json`, which the daemon reads on every request, so they take effect instantly
+in live sessions and leave the wiring alone.
+
+**hug never leaves an app pointed at a port with nothing behind it.** That is the one state that
+breaks every agent on the machine at once, so `hug on` refuses to wire until the daemon actually
+answers, `hug daemon stop` and `hug daemon uninstall` unwire before stopping, and `hug status`
+names any config that got stranded anyway:
+
+```
+  !! 2 app config(s) still point at 127.0.0.1:4711 with nothing listening.
+     Every request from these will fail with connection refused:
+       /Users/you/.claude/settings.local.json
+     Fix with `hug daemon start` (resume) or `hug off` (restore their own endpoints).
+```
+
+## Daemon
+
+```sh
+hug daemon start      # load the LaunchAgent and re-wire if hug is on
+hug daemon stop       # unwire, then unload — safe to leave a machine in
+hug daemon restart    # reload after upgrading the binary
+hug daemon install    # write the LaunchAgent and start it
+hug daemon uninstall  # unwire, stop, remove the LaunchAgent
+hug daemon run        # foreground, for debugging or a non-macOS supervisor
+```
+
+### Which file hug writes
+
+For Claude, hug writes `settings.local.json`, not `settings.json`. Claude Code merges both, but the
+shared one is commonly committed to a dotfiles repo — and a `127.0.0.1` daemon URL that follows you
+to a second machine fails every request there. If an older hug put the URL in `settings.json`, the
+next `hug on` moves it. `hug status` reads both, so a hand-moved `env` block still shows ✓.
 
 ## Routing
 

@@ -92,6 +92,51 @@ func Uninstall() error {
 	return nil
 }
 
+// Stop unloads the job without removing the plist, so `hug daemon start` can bring it back.
+// KeepAlive means nothing short of bootout actually stops it.
+func Stop() error {
+	if !Supported() {
+		return fmt.Errorf("not supported on this platform; stop whatever supervisor runs `hug daemon run`")
+	}
+	domain := fmt.Sprintf("gui/%d", os.Getuid())
+	if out, err := exec.Command("launchctl", "bootout", domain, PlistPath()).CombinedOutput(); err != nil {
+		// bootout exits non-zero when the job is already unloaded, which is not an error here.
+		if !Running(mustListen()) {
+			return nil
+		}
+		return fmt.Errorf("launchctl bootout: %v: %s", err, out)
+	}
+	return nil
+}
+
+// Start loads a previously installed job. It reports whether a plist existed to load at all;
+// callers should fall back to Install when it does not.
+func Start() (bool, error) {
+	if !Supported() {
+		return false, fmt.Errorf("not supported on this platform; run `hug daemon run` under your supervisor")
+	}
+	if _, err := os.Stat(PlistPath()); err != nil {
+		return false, nil
+	}
+	domain := fmt.Sprintf("gui/%d", os.Getuid())
+	if out, err := exec.Command("launchctl", "bootstrap", domain, PlistPath()).CombinedOutput(); err != nil {
+		// Already loaded is fine; anything else is not.
+		if !Running(mustListen()) {
+			return true, fmt.Errorf("launchctl bootstrap: %v: %s", err, out)
+		}
+	}
+	return true, nil
+}
+
+// mustListen reads the configured listen address, falling back to the default.
+func mustListen() string {
+	cfg, err := config.Load()
+	if err != nil || cfg.Listen == "" {
+		return "127.0.0.1:4711"
+	}
+	return cfg.Listen
+}
+
 // Restart kicks the running job so it reloads config.
 func Restart() error {
 	if !Supported() {

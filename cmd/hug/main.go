@@ -43,13 +43,15 @@ const usageText = `hug — per-phase model routing for coding agents
 
 Usage:
   hug init [--no-daemon] [--dry-run]   write config, wire installed apps, start the daemon
-  hug on  [target...]                  enable routing (targets: claude codex plan implement ship)
-  hug off [--for 2h] [target...]       disable routing globally, per app or per phase
+  hug on  [target...]                  enable routing and point the apps at hug
+  hug off [--for 2h] [target...]       disable routing and restore the apps' own endpoints
+                                       (targets: claude codex plan implement ship; a target or
+                                        --for pauses instead, leaving the wiring in place)
   hug pin <model> | hug unpin          force one model for everything
   hug status [--json]                  switch state, usage per vendor, recent decisions
   hug watch                            live-tail routing decisions and tier changes
   hug notify --test                    send one desktop notification from the daemon
-  hug daemon run|install|uninstall|restart
+  hug daemon run|install|start|stop|restart|uninstall
   hug wire | hug unwire [--dry-run]    (re)apply or remove app configuration only
   hug uninstall                        unwire apps and remove the daemon (keeps ~/.hug)
   hug version
@@ -153,6 +155,18 @@ func cmdInit(args []string) error {
 	return nil
 }
 
+// wiredTargets lists the app configs currently pointing at hug. With the daemon down, this is
+// the blast radius: every one of them is an agent that cannot reach any model at all.
+func wiredTargets() []wire.Target {
+	var out []wire.Target
+	for _, t := range wire.Discover() {
+		if wire.Wired(t) {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 func cmdWire(enable bool, args []string) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -245,7 +259,50 @@ func cmdToggle(enable bool, args []string) error {
 		return err
 	}
 	fmt.Println("hug:", st.Summary(time.Now()))
+
+	// A global toggle also moves the app configs, because "off" has to mean the agents work
+	// without hug -- including after a reboot, or if the daemon is not running. Leaving them
+	// pointed at 127.0.0.1 while nothing answers there breaks every agent on the machine.
+	// Scoped toggles (per app, per phase) and timed ones stay config-free: they are a pause,
+	// and the daemon is still there to honour them.
+	if len(targets) == 0 && until == nil {
+		if enable {
+			return wireForOn(time.Now())
+		}
+		return wireForOff()
+	}
 	return nil
+}
+
+// wireForOn points the apps at hug, but only once the daemon is actually answering: wiring
+// toward a dead port is the one state that breaks every agent at once.
+func wireForOn(now time.Time) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	if !daemon.Running(cfg.Listen) {
+		if daemon.Supported() {
+			started, err := daemon.Start()
+			if err != nil {
+				return fmt.Errorf("daemon is not running and could not be started: %w", err)
+			}
+			if !started {
+				return fmt.Errorf("hug is on, but no daemon is installed — run `hug daemon install`, then `hug on` again (apps left unwired on purpose)")
+			}
+		}
+		if !daemon.WaitReady(cfg.Listen, 5*time.Second) {
+			return fmt.Errorf("hug is on, but the daemon did not come up on %s — apps left unwired on purpose; see %s",
+				cfg.Listen, filepath.Join(config.Dir(), "daemon.log"))
+		}
+	}
+	return cmdWire(true, nil)
+}
+
+// wireForOff restores the apps' own URLs. The daemon keeps running, so sessions that are already
+// open still reach it and pass through untouched; only newly started ones read the clean config.
+func wireForOff() error {
+	return cmdWire(false, nil)
 }
 
 func cmdPin(args []string) error {
@@ -288,11 +345,39 @@ func cmdDaemon(args []string) error {
 			return fmt.Errorf("daemon did not come up; see %s", filepath.Join(config.Dir(), "daemon.log"))
 		}
 		fmt.Println("daemon installed and running on", cfg.Listen)
+	case "start":
+		started, err := daemon.Start()
+		if err != nil {
+			return err
+		}
+		if !started {
+			return fmt.Errorf("no daemon is installed — run `hug daemon install`")
+		}
+		if !daemon.WaitReady(cfg.Listen, 5*time.Second) {
+			return fmt.Errorf("daemon did not come up; see %s", filepath.Join(config.Dir(), "daemon.log"))
+		}
+		fmt.Println("daemon running on", cfg.Listen)
+		if state.Load().Active(time.Now()) {
+			return cmdWire(true, nil)
+		}
+	case "stop":
+		// Unwire first, always. Stopping while the apps still point at 4711 is exactly the
+		// state that makes every agent fail with connection-refused.
+		if err := cmdWire(false, nil); err != nil {
+			return err
+		}
+		if err := daemon.Stop(); err != nil {
+			return err
+		}
+		fmt.Println("daemon stopped, apps restored to their own endpoints (`hug on` to resume)")
 	case "uninstall":
+		if err := cmdWire(false, nil); err != nil {
+			return err
+		}
 		if err := daemon.Uninstall(); err != nil {
 			return err
 		}
-		fmt.Println("daemon removed")
+		fmt.Println("daemon removed, apps restored to their own endpoints")
 	case "restart":
 		if err := daemon.Restart(); err != nil {
 			return err
@@ -324,7 +409,18 @@ func cmdStatus(args []string) error {
 	s, err := fetchStatus(http.Client{Timeout: time.Second}, cfg.Listen)
 	if err != nil {
 		st := state.Load()
-		fmt.Printf("hug: %s\ndaemon: NOT RUNNING on %s (apps pointed at hug will fail until it starts: `hug daemon install`)\n", st.Summary(now), cfg.Listen)
+		fmt.Printf("hug: %s\ndaemon: NOT RUNNING on %s\n", st.Summary(now), cfg.Listen)
+		if stranded := wiredTargets(); len(stranded) > 0 {
+			fmt.Printf("\n  !! %d app config(s) still point at %s with nothing listening.\n", len(stranded), cfg.Listen)
+			fmt.Println("     Every request from these will fail with connection refused:")
+			for _, t := range stranded {
+				fmt.Printf("       %s\n", t.Path)
+			}
+			fmt.Println("     Fix with `hug daemon start` (resume) or `hug off` (restore their own endpoints).")
+		} else {
+			fmt.Println("\nno app points at hug, so every agent is talking to its vendor directly.")
+			fmt.Println("run `hug daemon start` to resume routing.")
+		}
 		return nil
 	}
 	if has(args, "--json") {

@@ -42,7 +42,7 @@ func Discover() []Target {
 	if claudeHome == "" {
 		claudeHome = filepath.Join(home, ".claude")
 	}
-	add(Target{App: "claude", Kind: KindClaudeSettings, Path: filepath.Join(claudeHome, "settings.json"), Label: "Claude Code · Claude app (Code tab)"})
+	add(Target{App: "claude", Kind: KindClaudeSettings, Path: claudeSettingsPath(claudeHome), Label: "Claude Code · Claude app (Code tab)"})
 	codexHome := os.Getenv("CODEX_HOME")
 	if codexHome == "" {
 		codexHome = filepath.Join(home, ".codex")
@@ -79,12 +79,20 @@ func t3Instances(path string) []Target {
 		}
 		switch inst.Driver {
 		case "claudeAgent":
-			out = append(out, Target{App: "claude", Kind: KindClaudeSettings, Path: filepath.Join(inst.Config.HomePath, "settings.json"), Label: "T3 Code · " + id})
+			out = append(out, Target{App: "claude", Kind: KindClaudeSettings, Path: claudeSettingsPath(inst.Config.HomePath), Label: "T3 Code · " + id})
 		case "codex":
 			out = append(out, Target{App: "codex", Kind: KindCodexConfig, Path: filepath.Join(inst.Config.HomePath, "config.toml"), Label: "T3 Code · " + id})
 		}
 	}
 	return out
+}
+
+// claudeSettingsPath is the file hug writes for a Claude home. Claude Code merges settings.json
+// and settings.local.json; hug targets the local one because the shared file is often committed
+// to a dotfiles repo, and a 127.0.0.1 daemon URL that follows you to another machine breaks every
+// request there.
+func claudeSettingsPath(home string) string {
+	return filepath.Join(home, "settings.local.json")
 }
 
 func expand(p, home string) string {
