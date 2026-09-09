@@ -5,15 +5,19 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tauantcamargo/hug/internal/config"
+	"github.com/tauantcamargo/hug/internal/notify"
 	"github.com/tauantcamargo/hug/internal/phase"
 	"github.com/tauantcamargo/hug/internal/policy"
 	"github.com/tauantcamargo/hug/internal/state"
@@ -25,23 +29,33 @@ var Version = "dev"
 
 // Server holds the proxies for every vendor.
 type Server struct {
-	cfg     config.Config
-	usage   *usage.Store
-	log     *DecisionLog
-	ship    *regexp.Regexp
-	anth    *httputil.ReverseProxy
-	oaiChat *httputil.ReverseProxy
-	oaiAPI  *httputil.ReverseProxy
-	started time.Time
+	cfg      config.Config
+	usage    *usage.Store
+	log      *DecisionLog
+	ship     *regexp.Regexp
+	notifier notify.Notifier
+	anth     *httputil.ReverseProxy
+	oaiChat  *httputil.ReverseProxy
+	oaiAPI   *httputil.ReverseProxy
+	started  time.Time
+
+	tierMu       sync.Mutex
+	lastTier     map[string]policy.Tier
+	lastNotifyAt map[string]time.Time
 }
 
-// New builds a server from config.
-func New(cfg config.Config, store *usage.Store, dlog *DecisionLog) *Server {
-	s := &Server{cfg: cfg, usage: store, log: dlog, ship: phase.ShipMatcher(cfg.Detect.ShipKeywords), started: time.Now()}
+// New builds a server from config. notifier may be nil to disable desktop notifications
+// entirely (tier-change events still show up in `hug watch` and the daemon log).
+func New(cfg config.Config, store *usage.Store, dlog *DecisionLog, notifier notify.Notifier) *Server {
+	if notifier == nil {
+		notifier = notify.NoopNotifier{}
+	}
+	s := &Server{cfg: cfg, usage: store, log: dlog, ship: phase.ShipMatcher(cfg.Detect.ShipKeywords), notifier: notifier, started: time.Now(),
+		lastTier: map[string]policy.Tier{}, lastNotifyAt: map[string]time.Time{}}
 	s.anth = newReverseProxy(cfg.Upstreams.Anthropic)
 	s.anth.ModifyResponse = func(res *http.Response) error {
 		if sn, ok := usage.ParseAnthropicHeaders(res.Header, time.Now()); ok {
-			s.usage.Set(sn)
+			s.recordUsage(sn)
 		}
 		return nil
 	}
@@ -55,6 +69,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/hug/health", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok\n")) })
 	mux.HandleFunc("/hug/status", s.status)
+	mux.HandleFunc("/hug/decisions", s.decisionsSince)
 	mux.Handle("/anthropic/", http.StripPrefix("/anthropic", http.HandlerFunc(s.anthropic)))
 	mux.Handle("/openai/", http.StripPrefix("/openai", http.HandlerFunc(s.openai)))
 	return mux
@@ -97,6 +112,42 @@ func (s *Server) CurrentStatus() Status {
 func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(s.CurrentStatus())
+}
+
+// decisionsSince serves `?since=N`: every decision newer than N, for `hug watch` to poll.
+func (s *Server) decisionsSince(w http.ResponseWriter, r *http.Request) {
+	since, _ := strconv.ParseUint(r.URL.Query().Get("since"), 10, 64)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(s.log.Since(since))
+}
+
+// recordUsage stores a fresh usage snapshot and, when it moves the vendor across a budget
+// tier boundary, appends a synthetic "tier-change" decision and — if configured and past
+// the cooldown — fires a desktop notification. This is the only place tier changes are
+// detected, so `hug watch` and notifications never disagree about when one happened.
+func (s *Server) recordUsage(sn usage.Snapshot) {
+	s.usage.Set(sn)
+	tier, why := policy.TierFor(s.cfg.Budget, &sn, time.Now())
+
+	s.tierMu.Lock()
+	prev, seen := s.lastTier[sn.Vendor]
+	s.lastTier[sn.Vendor] = tier
+	changed := seen && prev != tier
+	notifyDue := changed && s.cfg.Notify.TierChanges && time.Since(s.lastNotifyAt[sn.Vendor]) >= s.cfg.Notify.CooldownDuration()
+	if notifyDue {
+		s.lastNotifyAt[sn.Vendor] = time.Now()
+	}
+	s.tierMu.Unlock()
+
+	if !changed {
+		return
+	}
+	d := policy.Decision{Time: time.Now(), Vendor: sn.Vendor, App: policy.AppFor(sn.Vendor), Phase: "tier-change", Tier: tier, Reason: why}
+	s.log.Add(d)
+	log.Printf("tier-change %-9s %-9s %s", d.App, d.Tier, d.Reason)
+	if notifyDue {
+		_ = s.notifier.Notify("hug: "+sn.Vendor, fmt.Sprintf("now %s — %s", tier, why))
+	}
 }
 
 func newReverseProxy(upstream string) *httputil.ReverseProxy {

@@ -4,6 +4,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -28,6 +29,21 @@ type Detect struct {
 	ShipKeywords []string `toml:"ship_keywords"`
 }
 
+// Notify controls desktop notifications on budget tier changes (see `hug watch` for the
+// live terminal view of the same events).
+type Notify struct {
+	TierChanges bool   `toml:"tier_changes"`
+	Cooldown    string `toml:"cooldown"`
+}
+
+// CooldownDuration parses Cooldown, falling back to 5 minutes if unset or invalid.
+func (n Notify) CooldownDuration() time.Duration {
+	if d, err := time.ParseDuration(n.Cooldown); err == nil && d > 0 {
+		return d
+	}
+	return 5 * time.Minute
+}
+
 // Upstreams are the real API hosts hug forwards to.
 type Upstreams struct {
 	Anthropic     string `toml:"anthropic"`
@@ -42,6 +58,7 @@ type Config struct {
 	Phases    map[string]Phase `toml:"phases"`
 	Budget    Budget           `toml:"budget"`
 	Detect    Detect           `toml:"detect"`
+	Notify    Notify           `toml:"notify"`
 }
 
 // DefaultTOML is written by `hug init` when no config exists.
@@ -83,6 +100,12 @@ pace_factor = 1.15
 
 [detect]
 ship_keywords = ["commit", "pull request", "abrir pr", "abre um pr", "create a pr", "open a pr", "git push", "changelog", "release notes"]
+
+[notify]
+# desktop notification (macOS only today) when a vendor enters or leaves a budget tier.
+# ` + "`hug watch`" + ` shows the same events live in a terminal, on every platform.
+tier_changes = true
+cooldown     = "5m"
 `
 
 // Dir returns the hug home directory ($HUG_HOME or ~/.hug).

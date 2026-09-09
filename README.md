@@ -97,6 +97,40 @@ Measured on Claude Code 2.1.266, that is one extra premium call per turn avoided
 
 Nothing is polled; hug only reads what the APIs already send. `hug status` shows windows, reset times, the current tier and the last decisions.
 
+## Visibility
+
+hug operates below every app's UI, so none of them — Claude Code, Codex, T3 Code, the desktop
+apps — know a swap happened. Claude Code's own usage bookkeeping is keyed to the model *you
+requested*, not the one the response actually came from, even inside its own SDK stream that T3
+renders; there is no in-app badge to hook into without patching the CLI binary itself, which hug
+does not do. What actually works, uniformly, because it comes from the daemon rather than any one
+app:
+
+```sh
+hug watch
+```
+
+Live-tails every routing decision and every budget tier change as they happen, regardless of which
+app made the request:
+
+```
+15:24:56 claude implement claude-haiku-4-5-20251001  → claude-opus-5    normal    implement phase, normal tier: 5h window at 21%
+15:25:47 claude aux       claude-haiku-4-5-20251001  = claude-haiku...  normal    auxiliary call (no tool schema) — left on the model the app chose
+15:41:02          ── anthropic now conserve — 5h window at 71% ──
+```
+
+Desktop notifications fire on the same tier changes (macOS only today; a no-op elsewhere, hug still
+works):
+
+```toml
+[notify]
+tier_changes = true
+cooldown     = "5m"   # minimum gap between notifications for the same vendor
+```
+
+The very first observation of a vendor's tier is never a "change" — it just seeds the baseline, so
+the daemon doesn't fire a notification for every vendor the moment it starts.
+
 ## How it works
 
 - `/anthropic/*` is a reverse proxy to `api.anthropic.com`. `POST /v1/messages` bodies get their `model` rewritten. OAuth headers pass through untouched.
@@ -107,7 +141,7 @@ Nothing is polled; hug only reads what the APIs already send. `hug status` shows
 
 - `openai_base_url` must be a top-level key in `config.toml`. After any `[table]` it silently belongs to that table. hug writes it at the top.
 - GUI apps do not inherit your shell `PATH`, so hug never relies on shims; it edits the config files the apps already read.
-- Claude Code reports usage under the *requested* model name, not the served one. `hug status` shows the truth.
+- Claude Code reports usage under the *requested* model name, not the served one. `hug status` and `hug watch` show the truth.
 
 ## Development
 

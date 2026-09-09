@@ -154,7 +154,7 @@ func (s *Server) pumpUpstream(up, client *websocket.Conn, errc chan<- error) {
 		}
 		if mt == websocket.TextMessage && bytes.Contains(msg[:min(len(msg), 64)], []byte("codex.rate_limits")) {
 			if sn, ok := usage.ParseCodexRateLimits(msg, time.Now()); ok {
-				s.usage.Set(sn)
+				s.recordUsage(sn)
 			}
 		}
 		if err := client.WriteMessage(mt, msg); err != nil {

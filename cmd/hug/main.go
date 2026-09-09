@@ -17,6 +17,7 @@ import (
 
 	"github.com/tauantcamargo/hug/internal/config"
 	"github.com/tauantcamargo/hug/internal/daemon"
+	"github.com/tauantcamargo/hug/internal/notify"
 	"github.com/tauantcamargo/hug/internal/policy"
 	"github.com/tauantcamargo/hug/internal/proxy"
 	"github.com/tauantcamargo/hug/internal/state"
@@ -45,6 +46,7 @@ Usage:
   hug off [--for 2h] [target...]       disable routing globally, per app or per phase
   hug pin <model> | hug unpin          force one model for everything
   hug status [--json]                  switch state, usage per vendor, recent decisions
+  hug watch                            live-tail routing decisions and tier changes
   hug daemon run|install|uninstall|restart
   hug wire | hug unwire [--dry-run]    (re)apply or remove app configuration only
   hug uninstall                        unwire apps and remove the daemon (keeps ~/.hug)
@@ -75,6 +77,8 @@ func main() {
 		err = cmdPin(nil)
 	case "status":
 		err = cmdStatus(args)
+	case "watch":
+		err = cmdWatch(args)
 	case "daemon":
 		err = cmdDaemon(args)
 	case "wire":
@@ -266,7 +270,7 @@ func cmdDaemon(args []string) error {
 	case "run":
 		store := usage.NewStore(filepath.Join(config.Dir(), "usage.json"))
 		dlog := proxy.NewDecisionLog(filepath.Join(config.Dir(), "decisions.jsonl"), 200)
-		srv := proxy.New(cfg, store, dlog)
+		srv := proxy.New(cfg, store, dlog, notify.New())
 		log.Printf("hug %s listening on %s (anthropic -> %s, openai -> %s | %s)", version, cfg.Listen, cfg.Upstreams.Anthropic, cfg.Upstreams.OpenAIChatGPT, cfg.Upstreams.OpenAIAPI)
 		return http.ListenAndServe(cfg.Listen, srv.Handler())
 	case "install":
@@ -312,17 +316,11 @@ func cmdStatus(args []string) error {
 		return err
 	}
 	now := time.Now()
-	c := http.Client{Timeout: time.Second}
-	res, err := c.Get("http://" + cfg.Listen + "/hug/status")
+	s, err := fetchStatus(http.Client{Timeout: time.Second}, cfg.Listen)
 	if err != nil {
 		st := state.Load()
 		fmt.Printf("hug: %s\ndaemon: NOT RUNNING on %s (apps pointed at hug will fail until it starts: `hug daemon install`)\n", st.Summary(now), cfg.Listen)
 		return nil
-	}
-	defer res.Body.Close()
-	var s proxy.Status
-	if err := json.NewDecoder(res.Body).Decode(&s); err != nil {
-		return err
 	}
 	if has(args, "--json") {
 		b, _ := json.MarshalIndent(s, "", "  ")
@@ -377,14 +375,96 @@ func cmdStatus(args []string) error {
 		start = len(s.Recent) - 10
 	}
 	for _, d := range s.Recent[start:] {
-		arrow := "="
-		if d.Rewritten {
-			arrow = "→"
-		}
-		fmt.Printf("  %s %-6s %-9s %-26s %s %-26s %-9s %s\n", d.Time.Local().Format("15:04:05"), d.App, d.Phase, d.Requested, arrow, d.Model, d.Tier, d.Reason)
+		printDecisionLine(d)
 	}
-	_ = policy.TierNormal
 	return nil
+}
+
+// fetchStatus calls /hug/status. Callers pick the timeout: status wants a quick failure,
+// watch tolerates a slower daemon since it retries in a loop anyway.
+func fetchStatus(c http.Client, listen string) (proxy.Status, error) {
+	res, err := c.Get("http://" + listen + "/hug/status")
+	if err != nil {
+		return proxy.Status{}, err
+	}
+	defer res.Body.Close()
+	var s proxy.Status
+	err = json.NewDecoder(res.Body).Decode(&s)
+	return s, err
+}
+
+// fetchDecisions calls /hug/decisions?since=N.
+func fetchDecisions(c http.Client, listen string, since uint64) ([]policy.Decision, error) {
+	res, err := c.Get(fmt.Sprintf("http://%s/hug/decisions?since=%d", listen, since))
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	var ds []policy.Decision
+	err = json.NewDecoder(res.Body).Decode(&ds)
+	return ds, err
+}
+
+// printDecisionLine renders one decision the same way in `hug status` and `hug watch`.
+// A "tier-change" phase is synthetic (see policy.Decision) and gets its own banner line.
+func printDecisionLine(d policy.Decision) {
+	ts := d.Time.Local().Format("15:04:05")
+	if d.Phase == "tier-change" {
+		fmt.Printf("  %s  ── %s now %s — %s ──\n", ts, d.Vendor, d.Tier, d.Reason)
+		return
+	}
+	arrow := "="
+	if d.Rewritten {
+		arrow = "→"
+	}
+	fmt.Printf("  %s %-6s %-9s %-26s %s %-26s %-9s %s\n", ts, d.App, d.Phase, d.Requested, arrow, d.Model, d.Tier, d.Reason)
+}
+
+// cmdWatch live-tails routing decisions and tier changes across every app that flows
+// through hug — Claude Code, Codex, and T3 Code alike, since they all hit the same daemon.
+// There is no way to render this inside those apps' own UI (see the README), so this and
+// the desktop notifications on tier changes are the closest hug gets to "tell me what's
+// happening" without depending on any one app's interface.
+func cmdWatch(args []string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	c := http.Client{Timeout: 3 * time.Second}
+	var since uint64
+	if s, err := fetchStatus(c, cfg.Listen); err == nil {
+		for _, d := range s.Recent {
+			if d.Seq > since {
+				since = d.Seq
+			}
+		}
+		fmt.Printf("hug watch — %s\n", s.State.Summary(time.Now()))
+	} else {
+		fmt.Printf("hug watch — waiting for the daemon on %s ...\n", cfg.Listen)
+	}
+	fmt.Println("watching for plan/implement/ship routing and budget tier changes. ctrl-c to stop.")
+
+	down := false
+	for {
+		ds, err := fetchDecisions(c, cfg.Listen, since)
+		if err != nil {
+			if !down {
+				fmt.Println("  ... daemon unreachable, retrying")
+				down = true
+			}
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		if down {
+			fmt.Println("  ... daemon back")
+			down = false
+		}
+		for _, d := range ds {
+			since = d.Seq
+			printDecisionLine(d)
+		}
+		time.Sleep(700 * time.Millisecond)
+	}
 }
 
 func fmtReset(t, now time.Time) string {

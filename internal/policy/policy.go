@@ -22,8 +22,11 @@ const (
 	TierExhausted Tier = "exhausted"
 )
 
-// Decision is one routing outcome; it is logged and shown by `hug status`.
+// Decision is one routing outcome; it is logged and shown by `hug status` and `hug watch`.
+// Phase "tier-change" is synthetic: the daemon emits one whenever a vendor's budget tier
+// changes, independent of any single routed request, so watchers see it even between turns.
 type Decision struct {
+	Seq       uint64    `json:"seq"`
 	Time      time.Time `json:"time"`
 	Vendor    string    `json:"vendor"`
 	App       string    `json:"app,omitempty"`
