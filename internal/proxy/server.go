@@ -44,6 +44,7 @@ type Server struct {
 	tierMu       sync.Mutex
 	lastTier     map[string]policy.Tier
 	lastNotifyAt map[string]time.Time
+	lastRoute    map[string]string
 }
 
 // New builds a server from config. notifier may be nil to disable desktop notifications
@@ -53,7 +54,7 @@ func New(cfg config.Config, store *usage.Store, dlog *DecisionLog, notifier noti
 		notifier = notify.NoopNotifier{}
 	}
 	s := &Server{cfg: cfg, usage: store, log: dlog, ship: phase.ShipMatcher(cfg.Detect.ShipKeywords), notifier: notifier, started: time.Now(),
-		lastTier: map[string]policy.Tier{}, lastNotifyAt: map[string]time.Time{}}
+		lastTier: map[string]policy.Tier{}, lastNotifyAt: map[string]time.Time{}, lastRoute: map[string]string{}}
 	s.anth = newReverseProxy(cfg.Upstreams.Anthropic)
 	s.anth.ModifyResponse = func(res *http.Response) error {
 		if sn, ok := usage.ParseAnthropicHeaders(res.Header, time.Now()); ok {
@@ -72,6 +73,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/hug/health", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok\n")) })
 	mux.HandleFunc("/hug/status", s.status)
 	mux.HandleFunc("/hug/decisions", s.decisionsSince)
+	mux.HandleFunc("/hug/notify/test", s.notifyTest)
 	mux.Handle("/anthropic/", http.StripPrefix("/anthropic", http.HandlerFunc(s.anthropic)))
 	mux.Handle("/openai/", http.StripPrefix("/openai", http.HandlerFunc(s.openai)))
 	return mux
@@ -123,6 +125,20 @@ func (s *Server) decisionsSince(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(s.log.Since(since))
 }
 
+// notifyTest sends one notification through the real notifier. It exists because the daemon
+// runs under a supervisor, and whether a desktop notification actually reaches the screen
+// from there is not something the CLI's own process can answer — it has to be sent from here.
+// It deliberately ignores notify.tier_changes and the cooldown: this is a delivery probe.
+func (s *Server) notifyTest(w http.ResponseWriter, _ *http.Request) {
+	err := s.notifier.Notify("hug", "test notification — delivery is working")
+	w.Header().Set("Content-Type", "application/json")
+	out := map[string]any{"sent": err == nil}
+	if err != nil {
+		out["error"] = err.Error()
+	}
+	_ = json.NewEncoder(w).Encode(out)
+}
+
 // recordUsage stores a fresh usage snapshot and, when it moves the vendor across a budget
 // tier boundary, appends a synthetic "tier-change" decision and — if configured and past
 // the cooldown — fires a desktop notification. This is the only place tier changes are
@@ -134,7 +150,10 @@ func (s *Server) recordUsage(sn usage.Snapshot) {
 	s.tierMu.Lock()
 	prev, seen := s.lastTier[sn.Vendor]
 	s.lastTier[sn.Vendor] = tier
-	changed := seen && prev != tier
+	// A first observation normally just seeds the baseline. But if the daemon comes up
+	// already degraded — a restart mid-window — staying quiet means you are downgraded
+	// with no signal at all, since the transition into that tier happened while we were down.
+	changed := seen && prev != tier || !seen && tier != policy.TierNormal
 	notifyDue := changed && s.cfg.Notify.TierChanges && time.Since(s.lastNotifyAt[sn.Vendor]) >= s.cfg.Notify.CooldownDuration()
 	if notifyDue {
 		s.lastNotifyAt[sn.Vendor] = time.Now()
@@ -148,7 +167,11 @@ func (s *Server) recordUsage(sn usage.Snapshot) {
 	s.log.Add(d)
 	log.Printf("tier-change %-9s %-9s %s", d.App, d.Tier, d.Reason)
 	if notifyDue {
-		_ = s.notifier.Notify("hug: "+sn.Vendor, fmt.Sprintf("now %s — %s", tier, why))
+		lead := "now"
+		if !seen {
+			lead = "already"
+		}
+		_ = s.notifier.Notify("hug: "+sn.Vendor, fmt.Sprintf("%s %s — %s", lead, tier, why))
 	}
 }
 
@@ -233,7 +256,30 @@ func (s *Server) decide(vendor string, payload map[string]any, session string) p
 	d.Session = session
 	s.log.Add(d)
 	log.Printf("%-9s %-9s %-24s -> %-24s %-9s %s", d.App, d.Phase, d.Requested, d.Model, d.Tier, d.Reason)
+	s.notifyRouting(d)
 	return d
+}
+
+// notifyRouting tells you when hug starts serving a phase from a different model than the one
+// the app is showing. The apps display the model you picked, not the one that answered, so a
+// rewrite is otherwise invisible. Keyed by app+phase rather than by session so that opening a
+// new chat does not re-announce a routing you already know about.
+func (s *Server) notifyRouting(d policy.Decision) {
+	if !s.cfg.Notify.RoutingChanges || !d.Rewritten {
+		return
+	}
+	key := d.App + "|" + d.Phase
+	route := d.Requested + " -> " + d.Model
+
+	s.tierMu.Lock()
+	changed := s.lastRoute[key] != route
+	s.lastRoute[key] = route
+	s.tierMu.Unlock()
+
+	if !changed {
+		return
+	}
+	_ = s.notifier.Notify("hug: "+d.App+" "+d.Phase, route+" — "+string(d.Tier))
 }
 
 // marshal encodes without HTML escaping so bodies stay byte-for-byte close to the original.

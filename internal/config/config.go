@@ -32,8 +32,9 @@ type Detect struct {
 // Notify controls desktop notifications on budget tier changes (see `hug watch` for the
 // live terminal view of the same events).
 type Notify struct {
-	TierChanges bool   `toml:"tier_changes"`
-	Cooldown    string `toml:"cooldown"`
+	TierChanges    bool   `toml:"tier_changes"`
+	RoutingChanges bool   `toml:"routing_changes"`
+	Cooldown       string `toml:"cooldown"`
 }
 
 // CooldownDuration parses Cooldown, falling back to 5 minutes if unset or invalid.
@@ -105,6 +106,10 @@ ship_keywords = ["commit", "pull request", "abrir pr", "abre um pr", "create a p
 # desktop notification (macOS only today) when a vendor enters or leaves a budget tier.
 # ` + "`hug watch`" + ` shows the same events live in a terminal, on every platform.
 tier_changes = true
+# notify when a phase starts being served by a different model than the one you picked.
+# The apps show the model you selected, not the one that answered, so this is the only
+# in-your-face signal that a rewrite happened.
+routing_changes = true
 cooldown     = "5m"
 `
 

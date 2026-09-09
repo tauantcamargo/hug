@@ -47,6 +47,7 @@ Usage:
   hug pin <model> | hug unpin          force one model for everything
   hug status [--json]                  switch state, usage per vendor, recent decisions
   hug watch                            live-tail routing decisions and tier changes
+  hug notify --test                    send one desktop notification from the daemon
   hug daemon run|install|uninstall|restart
   hug wire | hug unwire [--dry-run]    (re)apply or remove app configuration only
   hug uninstall                        unwire apps and remove the daemon (keeps ~/.hug)
@@ -79,6 +80,8 @@ func main() {
 		err = cmdStatus(args)
 	case "watch":
 		err = cmdWatch(args)
+	case "notify":
+		err = cmdNotify(args)
 	case "daemon":
 		err = cmdDaemon(args)
 	case "wire":
@@ -382,6 +385,40 @@ func cmdStatus(args []string) error {
 
 // fetchStatus calls /hug/status. Callers pick the timeout: status wants a quick failure,
 // watch tolerates a slower daemon since it retries in a loop anyway.
+// cmdNotify checks that desktop notifications actually reach the screen. It asks the daemon
+// to send one rather than sending it here: the daemon runs under a supervisor, and that is
+// the process whose notifications you need to trust. Sending from this terminal would prove
+// nothing about the path that matters.
+func cmdNotify(args []string) error {
+	if len(args) == 0 || args[0] != "--test" {
+		return fmt.Errorf("usage: hug notify --test")
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	c := http.Client{Timeout: 10 * time.Second}
+	res, err := c.Post("http://"+cfg.Listen+"/hug/notify/test", "application/json", nil)
+	if err != nil {
+		return fmt.Errorf("daemon unreachable at %s: %w", cfg.Listen, err)
+	}
+	defer res.Body.Close()
+	var out struct {
+		Sent  bool   `json:"sent"`
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		return err
+	}
+	if !out.Sent {
+		return fmt.Errorf("the daemon could not send a notification: %s", out.Error)
+	}
+	fmt.Println("sent — if nothing appeared on screen, macOS is suppressing it:")
+	fmt.Println("  System Settings > Notifications > Script Editor  (allow notifications)")
+	fmt.Println("  and check that Do Not Disturb / a Focus mode is off.")
+	return nil
+}
+
 func fetchStatus(c http.Client, listen string) (proxy.Status, error) {
 	res, err := c.Get("http://" + listen + "/hug/status")
 	if err != nil {
