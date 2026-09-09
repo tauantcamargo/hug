@@ -125,9 +125,35 @@ func (s *Server) snapshot(vendor string) *usage.Snapshot {
 	return nil
 }
 
+// auxiliary reports whether a request is one of the small side calls agents make per turn
+// (conversation titles, quota probes, classifiers). They arrive with no tools and a small
+// output budget; routing them wastes the budget of the phase's top model.
+func auxiliary(payload map[string]any) bool {
+	if tools, ok := payload["tools"].([]any); ok && len(tools) > 0 {
+		return false
+	}
+	if maxTok, ok := payload["max_tokens"].(float64); ok && maxTok > auxMaxTokens {
+		return false
+	}
+	if maxOut, ok := payload["max_output_tokens"].(float64); ok && maxOut > auxMaxTokens {
+		return false
+	}
+	return true
+}
+
+// auxMaxTokens is the output budget below which a tool-less request counts as auxiliary.
+const auxMaxTokens = 4096
+
 // decide runs detection and policy for one parsed request payload.
 func (s *Server) decide(vendor string, payload map[string]any, session string) policy.Decision {
 	requested, _ := payload["model"].(string)
+	if auxiliary(payload) {
+		d := policy.Decision{Time: time.Now(), Vendor: vendor, App: policy.AppFor(vendor), Session: session,
+			Phase: "aux", Requested: requested, Model: requested, Tier: policy.TierNormal,
+			Reason: "auxiliary call (no tools, small output budget) — left on the model the app chose"}
+		s.log.Add(d)
+		return d
+	}
 	var ph string
 	if vendor == "anthropic" {
 		ph = phase.DetectAnthropic(payload, s.ship)

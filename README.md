@@ -85,6 +85,10 @@ Phase detection uses markers the agents inject themselves, so it is deterministi
 - Codex: `<collaboration_mode>Plan</collaboration_mode>` in developer instructions
 - ship: keyword heuristic on the last user message (`[detect] ship_keywords`), off when the list is empty
 
+Agents also fire small side calls each turn (conversation titles, classifiers). They arrive with no
+tools and a small output budget, so hug leaves them on whatever cheap model the app picked instead of
+promoting them to the phase's top model. They appear in `hug status` as the `aux` phase.
+
 ## Usage awareness
 
 - Anthropic: `anthropic-ratelimit-unified-{5h,7d}-utilization` and `-reset` response headers
