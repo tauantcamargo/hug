@@ -85,9 +85,10 @@ Phase detection uses markers the agents inject themselves, so it is deterministi
 - Codex: `<collaboration_mode>Plan</collaboration_mode>` in developer instructions
 - ship: keyword heuristic on the last user message (`[detect] ship_keywords`), off when the list is empty
 
-Agents also fire small side calls each turn (conversation titles, classifiers). They arrive with no
-tools and a small output budget, so hug leaves them on whatever cheap model the app picked instead of
-promoting them to the phase's top model. They appear in `hug status` as the `aux` phase.
+Agents also fire side calls around each turn: conversation titles, classifiers, cache warmups. They
+arrive with an empty tool schema, so hug leaves them on whatever cheap model the app already picked
+instead of promoting them to the phase's top model. They show up as the `aux` phase in `hug status`.
+Measured on Claude Code 2.1.266, that is one extra premium call per turn avoided.
 
 ## Usage awareness
 

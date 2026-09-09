@@ -125,24 +125,30 @@ func (s *Server) snapshot(vendor string) *usage.Snapshot {
 	return nil
 }
 
-// auxiliary reports whether a request is one of the small side calls agents make per turn
-// (conversation titles, quota probes, classifiers). They arrive with no tools and a small
-// output budget; routing them wastes the budget of the phase's top model.
+// auxiliary reports whether a request is one of the side calls agents make around a turn
+// rather than the turn itself: conversation titles, classifiers, cache warmups.
+//
+// The decisive signal is an empty tool schema. An agentic turn always ships its tools; Claude
+// Code's title request, for example, arrives with zero tools and a 3 KB system prompt next to
+// the real turn's 30 tools and 27 KB. Routing those to the phase's top model spends premium
+// budget on work the app already assigned to a cheap model.
 func auxiliary(payload map[string]any) bool {
-	if tools, ok := payload["tools"].([]any); ok && len(tools) > 0 {
-		return false
+	tools, _ := payload["tools"].([]any)
+	if len(tools) == 0 {
+		return true
 	}
-	if maxTok, ok := payload["max_tokens"].(float64); ok && maxTok > auxMaxTokens {
-		return false
+	// Tools present but almost no output budget: a warmup or probe, not a turn.
+	if maxTok, ok := payload["max_tokens"].(float64); ok && maxTok <= auxMaxTokens {
+		return true
 	}
-	if maxOut, ok := payload["max_output_tokens"].(float64); ok && maxOut > auxMaxTokens {
-		return false
+	if maxOut, ok := payload["max_output_tokens"].(float64); ok && maxOut <= auxMaxTokens {
+		return true
 	}
-	return true
+	return false
 }
 
-// auxMaxTokens is the output budget below which a tool-less request counts as auxiliary.
-const auxMaxTokens = 4096
+// auxMaxTokens is the output budget at or below which a request counts as a probe.
+const auxMaxTokens = 64
 
 // decide runs detection and policy for one parsed request payload.
 func (s *Server) decide(vendor string, payload map[string]any, session string) policy.Decision {

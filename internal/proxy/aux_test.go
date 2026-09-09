@@ -20,12 +20,14 @@ func TestAuxiliary(t *testing.T) {
 		body string
 		want bool
 	}{
-		{"title generation", `{"model":"claude-haiku-4-5-20251001","max_tokens":512,"messages":[{"role":"user","content":"summarize"}]}`, true},
-		{"agent turn", `{"model":"claude-opus-5","max_tokens":32000,"tools":[{"name":"Bash"}],"messages":[]}`, false},
-		{"big output, no tools", `{"model":"claude-opus-5","max_tokens":32000,"messages":[]}`, false},
+		// Shape observed live from Claude Code 2.1.266: the title call rides the same
+		// max_tokens as the real turn, so only the empty tool schema separates them.
+		{"claude title call", `{"model":"claude-haiku-4-5-20251001","max_tokens":32000,"stream":true,"messages":[{"role":"user","content":"<session>hi</session>\n\nWrite the title in the predominant language of the session"}]}`, true},
+		{"claude agent turn", `{"model":"claude-opus-5","max_tokens":32000,"tools":[{"name":"Bash"},{"name":"Read"}],"messages":[]}`, false},
 		{"codex turn", `{"type":"response.create","model":"gpt-5.5","tools":[{"name":"exec_command"}]}`, false},
 		{"openai classifier", `{"model":"gpt-5.5","max_output_tokens":256}`, true},
-		{"tools present but empty", `{"model":"claude-opus-5","tools":[],"max_tokens":1000}`, true},
+		{"tools present but empty", `{"model":"claude-opus-5","tools":[],"max_tokens":32000}`, true},
+		{"cache warmup with tools", `{"model":"claude-opus-5","tools":[{"name":"Bash"}],"max_tokens":1}`, true},
 	}
 	for _, c := range cases {
 		if got := auxiliary(parse(t, c.body)); got != c.want {
