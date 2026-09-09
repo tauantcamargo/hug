@@ -330,6 +330,9 @@ func cmdStatus(args []string) error {
 		return nil
 	}
 	fmt.Printf("hug: %s\ndaemon: running on %s, up %s, version %s\n", s.State.Summary(now), s.Listen, s.Uptime, s.Version)
+	if version != "dev" && s.Version != "dev" && s.Version != version {
+		fmt.Printf("  ! the daemon is running %s while this CLI is %s — run `hug daemon install` to point launchd at this binary\n", s.Version, version)
+	}
 	fmt.Println("\nwiring:")
 	for _, t := range wire.Discover() {
 		mark := "✗"
