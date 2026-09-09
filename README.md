@@ -33,6 +33,25 @@ ln -sf "$(go env GOPATH)/bin/hug" ~/.local/bin/hug
 
 Restart open agent sessions once; from then on every request flows through `127.0.0.1:4711`.
 
+## Update
+
+```sh
+go install github.com/tauantcamargo/hug/cmd/hug@latest
+hug daemon restart
+```
+
+The restart is not optional. `go install` replaces the binary on disk, but launchd keeps running the
+copy it already started, so without it you get a new CLI talking to an old daemon. `hug status`
+catches that and says so:
+
+```
+! the daemon is running v0.1.7 while this CLI is v0.1.8 — run `hug daemon install` to point launchd at this binary
+```
+
+Use `hug daemon install` rather than `restart` when the binary *path* changed, since that rewrites
+the LaunchAgent instead of just kicking the service. App configs are untouched by an update, so
+there is no need to re-run `hug wire`.
+
 ## Toggle
 
 ```sh
