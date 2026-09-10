@@ -38,6 +38,71 @@ func TestAnthropic(t *testing.T) {
 	}
 }
 
+// Issue #4: a ship keyword is a noun as often as a verb, so talking about the work looked
+// exactly like asking for it and quietly routed the turn to the cheapest model.
+func TestShipIntentSeparatesOrdersFromTalk(t *testing.T) {
+	ship := ShipMatcher([]string{"commit", "pull request", "create a pr", "open a pr", "git push", "changelog", "release notes"})
+
+	orders := []string{
+		"commit this",
+		"ok now commit and push it",
+		"please open a pr against main",
+		"let's commit what we have so far",
+		"can you commit this and write release notes?",
+		"go ahead and create a pr",
+		"fix the test then git push",
+		"update the changelog",
+	}
+	for _, s := range orders {
+		if !shipIntent(s, ship) {
+			t.Errorf("should read as ship: %q", s)
+		}
+	}
+
+	talk := []string{
+		// The reporter's case: discussing the feature, not using it.
+		"we were talking about the commit flow, not doing it",
+		"how does hug detect a commit?",
+		"should we commit this?",
+		"what goes in the changelog?",
+		"the commit message convention here is lowercase",
+		"read the pull request template",
+		"explain how a commit is different from a pull request",
+		"this commit broke the build",
+		"look at the last commit",
+		"the changelog format is keepachangelog",
+	}
+	for _, s := range talk {
+		if shipIntent(s, ship) {
+			t.Errorf("should NOT read as ship: %q", s)
+		}
+	}
+
+	if shipIntent("commit this", nil) {
+		t.Error("a nil matcher disables the heuristic entirely")
+	}
+}
+
+// Once the agent has actually run a shipping command, wording stops mattering: the work is
+// demonstrably underway and the remaining turns are mechanical.
+func TestShipDetectedFromGitActivity(t *testing.T) {
+	ship := ShipMatcher([]string{"commit"})
+	underway := body(`{"messages":[
+	 {"role":"user","content":[{"type":"text","text":"wrap this up"}]},
+	 {"role":"assistant","content":[{"type":"tool_use","name":"Bash","id":"1","input":{"command":"git commit -m 'fix'"}}]},
+	 {"role":"user","content":[{"type":"tool_result","tool_use_id":"1","content":"[main abc123]"},{"type":"text","text":"now the tag"}]}]}`)
+	if got := DetectAnthropic(underway, ship); got != Ship {
+		t.Errorf("a real git commit must put the session in ship, got %s", got)
+	}
+
+	reading := body(`{"messages":[
+	 {"role":"assistant","content":[{"type":"tool_use","name":"Bash","id":"1","input":{"command":"git log --oneline -5"}}]},
+	 {"role":"user","content":[{"type":"text","text":"what changed here?"}]}]}`)
+	if got := DetectAnthropic(reading, ship); got != Implement {
+		t.Errorf("reading history is not shipping, got %s", got)
+	}
+}
+
 // Issue #3: reading or quoting the words must not hijack the session.
 func TestAnthropicPlanMarkerNeedsSystemReminder(t *testing.T) {
 	ship := ShipMatcher([]string{"commit"})

@@ -139,7 +139,7 @@ Phase detection uses markers the agents inject themselves, so it is deterministi
 
 - Claude Code: a `Plan mode is active` system-reminder in the **newest** user message. Claude Code rebuilds that reminder from the live permission mode on every request, so reading the newest turn is both sufficient and self-clearing — nothing has to detect leaving plan mode. The `<system-reminder>` wrapper is required, so typing, quoting or reading the words does not route you as planning
 - Codex: `<collaboration_mode>Plan</collaboration_mode>` in developer instructions
-- ship: keyword heuristic on the last user message (`[detect] ship_keywords`), off when the list is empty. This one is a guess and can misfire when you are *talking about* shipping rather than shipping — empty the list to turn it off
+- ship: either the agent has actually run a shipping command (`git commit`, `git push`, `gh pr create`), which is unambiguous, or the newest user message *orders* one. A keyword alone is not enough, since "commit" is a noun about as often as a verb: `commit this` and `update the changelog` are ship, while `the commit message convention`, `look at the last commit` and `should we commit?` are not. Configure the terms with `[detect] ship_keywords`; empty the list to turn the wording half off entirely
 
 If the vendor rejects the model hug picked — a chain entry your CLI is too old for, a model your
 account cannot reach — hug retries the turn down the rest of the chain, ending at the model the app

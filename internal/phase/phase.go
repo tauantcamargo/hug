@@ -33,6 +33,65 @@ func ShipMatcher(keywords []string) *regexp.Regexp {
 	return regexp.MustCompile(`(?i)\b(` + strings.Join(parts, "|") + `)\b`)
 }
 
+// A ship keyword is a poor signal on its own: "commit" is a noun as often as a verb, so talking
+// about the work looks exactly like asking for it. These narrow the keyword to an instruction.
+var (
+	// Determiners, possessives and prepositions turn the keyword into a thing being named:
+	// "the commit", "your PR", "about a changelog".
+	shipNamed = regexp.MustCompile(`(?i)(\b(the|a|an|this|that|these|those|my|your|our|its|their|each|every|last|first|next|previous|no|any|some|one|two|other|about|of|for|from|in|on|per|via)\s+|[/\-_.])$`)
+	// A noun after it does the same: "commit message", "commit history".
+	shipNaming = regexp.MustCompile(`(?i)^(s|es)?\s*(message|msg|hash|sha|id|history|log|graph|count|template|convention|format|style|body|title|description|number|flow|process|policy|hook|author|date|range|diff|tree|list)\b`)
+	// Questions ask about shipping rather than order it -- unless they are a polite request.
+	// An imperative that produces or publishes overrides the noun rules: "update the changelog"
+	// orders the work even though a determiner follows, while "the changelog format is ..." and
+	// "look at the last commit" only name it.
+	shipDoing  = regexp.MustCompile(`(?i)^[\s,]*((ok(ay)?|now|then|and|also|please|next|finally|first)[\s,]+)*(update|write|add|bump|generate|create|prepare|draft|make|edit|fill|amend|squash|revert|tag|publish|release|ship|push|commit|open|cut|do)\b`)
+	shipAsking = regexp.MustCompile(`(?i)^\s*(should|shall|do|does|did|is|are|was|were|has|have|had|what|why|how|when|where|which|who|whether|if)\b`)
+	shipPolite = regexp.MustCompile(`(?i)\b(can|could|would|will)\s+(you|u)\b|\bplease\b|\blet'?s\b|\bgo ahead\b`)
+	// What the agent runs when shipping is genuinely happening. Unlike the user's wording this
+	// is unambiguous, so it is trusted on its own.
+	shipCommand = regexp.MustCompile(`(?i)\bgit\s+(commit|push|tag)\b|\bgh\s+(pr|release)\s+create\b|\bgit\s+cherry-pick\b`)
+)
+
+// sentences splits on terminators and keeps them, so a trailing "?" is still visible to the
+// caller deciding whether a clause asks about shipping or orders it.
+func sentences(text string) []string {
+	var out []string
+	start := 0
+	for i, r := range text {
+		if r == '.' || r == '!' || r == '?' || r == '\n' || r == ';' {
+			out = append(out, text[start:i+1])
+			start = i + 1
+		}
+	}
+	if start < len(text) {
+		out = append(out, text[start:])
+	}
+	return out
+}
+
+// shipIntent reports whether text tells the agent to ship, as opposed to discussing shipping.
+// Each keyword hit has to survive being read as a noun and as a question.
+func shipIntent(text string, ship *regexp.Regexp) bool {
+	if ship == nil || text == "" {
+		return false
+	}
+	for _, s := range sentences(text) {
+		asking := shipAsking.MatchString(s) || strings.Contains(s, "?")
+		if asking && !shipPolite.MatchString(s) {
+			continue
+		}
+		ordering := shipDoing.MatchString(s)
+		for _, loc := range ship.FindAllStringIndex(s, -1) {
+			if !ordering && (shipNamed.MatchString(s[:loc[0]]) || shipNaming.MatchString(s[loc[1]:])) {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
 // isSystemReminder reports whether a text block is one Claude Code injected rather than
 // something the user or a tool result wrote.
 func isSystemReminder(t string) bool {
@@ -71,10 +130,35 @@ func DetectAnthropic(body map[string]any, ship *regexp.Regexp) string {
 			}
 		}
 	}
-	if ship != nil && ship.MatchString(lastUser) {
+	if ship != nil && (shipIntent(lastUser, ship) || shippingUnderway(msgs)) {
 		return Ship
 	}
 	return Implement
+}
+
+// shippingUnderway reports whether the agent has actually run a shipping command in this
+// conversation. The user's wording is ambiguous; `git commit` is not. Once the work has begun
+// the remaining turns are mechanical, which is the whole reason the ship chain is cheap.
+func shippingUnderway(msgs []any) bool {
+	for _, m := range msgs {
+		mm, _ := m.(map[string]any)
+		if mm["role"] != "assistant" {
+			continue
+		}
+		blocks, _ := mm["content"].([]any)
+		for _, b := range blocks {
+			bm, _ := b.(map[string]any)
+			if bm["type"] != "tool_use" {
+				continue
+			}
+			in, _ := bm["input"].(map[string]any)
+			cmd, _ := in["command"].(string)
+			if shipCommand.MatchString(cmd) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // DetectOpenAI classifies a Responses API `response.create` payload (websocket frame or HTTP body).
@@ -104,7 +188,7 @@ func DetectOpenAI(frame map[string]any, ship *regexp.Regexp) string {
 	if codexPlanMarker.MatchString(lastDev) {
 		return Plan
 	}
-	if ship != nil && ship.MatchString(lastUser) {
+	if shipIntent(lastUser, ship) {
 		return Ship
 	}
 	return Implement
